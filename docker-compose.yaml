@@ -1,0 +1,215 @@
+# Docker Compose - EventFlow Development Environment
+
+services:
+  # ============================================
+  # INFRASTRUCTURE
+  # ============================================
+
+  # Zookeeper (required for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: eventflowapp-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+
+  # Kafka Message Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: eventflowapp-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  # Kafka UI (optional - for debugging)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: eventflowapp-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: eventflowapp
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: eventflowapp-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: eventflowapp
+      POSTGRES_PASSWORD: eventflow_password
+      POSTGRES_DB: eventflowapp
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventflowapp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (for caching/sessions - optional)
+  redis:
+    image: redis:7-alpine
+    container_name: eventflowapp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  # ============================================
+  # DEVELOPMENT TOOLS
+  # ============================================
+
+  # Mailhog (email testing)
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: eventflowapp-mailhog
+    ports:
+      - "1025:1025" # SMTP server
+      - "8025:8025" # Web U
+
+
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: api-gateway
+    container_name: eventflowapp-api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - EVENTS_SERVICE_URL=http://events-service:3002
+      - TICKETS_SERVICE_URL=http://tickets-service:3003
+      - JWT_SECRET=your_jwt_secret_key
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      auth-service:
+         condition: service_started
+      events-service:
+          condition: service_started
+      tickets-service:
+          condition: service_started
+    restart: unless-stopped
+
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: auth-service
+    container_name: eventflowapp-auth-service
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DATABASE_URL=postgres://eventflowapp:eventflow_password@postgres:5432/eventflowapp
+      - KAFKA_BROKER=kafka:29092
+      - JWT_SECRET=your_jwt_secret_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+  
+  events-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: events-service
+    container_name: eventflowapp-events-service
+    ports:
+      - "3003:3003"
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - DATABASE_URL=postgres://eventflowapp:eventflow_password@postgres:5432/eventflowapp
+      - KAFKA_BROKER=kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  
+  tickets-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: tickets-service
+    container_name: eventflowapp-tickets-service
+    ports:
+      - "3004:3004"
+    environment:
+      - NODE_ENV=production
+      - PORT=3004
+      - DATABASE_URL=postgres://eventflowapp:eventflow_password@postgres:5432/eventflowapp
+      - KAFKA_BROKER=kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  
+  notifications-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: notifications-service
+    container_name: eventflowapp-notifications-service
+    ports:
+      - "3006:3006"
+    environment:
+      - NODE_ENV=production
+      - PORT=3006
+      - DATABASE_URL=postgres://eventflowapp:eventflow_password@postgres:5432/eventflowapp
+      - KAFKA_BROKER=kafka:29092
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    restart: unless-stopped
+    
+
+volumes:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  postgres-data:
+  redis-data:
